@@ -172,7 +172,7 @@ instance (KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
 -- BVIx 32 7
 -- >>> :type it
 -- it :: BVIx 32 7
-bvIx :: (KnownNat w, KnownNat ix, ix + 1 <= w) => BVIx w ix
+bvIx :: (KnownNat ix, ix + 1 <= w) => BVIx w ix
 bvIx = knownRepr
 
 -- | Get a lens from a 'BVIx'.
