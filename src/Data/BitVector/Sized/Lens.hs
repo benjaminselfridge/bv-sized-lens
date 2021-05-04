@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE PolyKinds #-}
@@ -98,26 +99,28 @@ module Data.BitVector.Sized.Lens
   , BVView(..)
   , bvView
   , bvViewL
-  , type Elem
-  , type Length
-  , type Slice
-  , type Slice'
-  , type (++)
     -- * BVViews
   , BVViews(..)
   , bvViews
   , bvViewsL
+  -- * Type families on lists
+  , type (++)
+  , type Slice
+  , type Slice'
+  , type Length
+  , type Lengths
+  , type Elem
   , type Intersection
   , type Disjoint
+  , type AllDistinct
+  , type AllDisjoint'
   , type AllDisjoint
-  , type Lengths
   ) where
 
 import           Data.BitVector.Sized ( BV, pattern BV )
 import qualified Data.BitVector.Sized as BV
 import Data.Parameterized.Classes
-import           Data.Parameterized.List (List)
-import qualified Data.Parameterized.List as PL
+import           Data.Parameterized.List
 import Data.Parameterized.NatRepr
 import Data.Type.Bool
 import Data.Type.Equality
@@ -127,7 +130,7 @@ import Control.Lens.Setter
 import GHC.TypeNats
 import Prelude hiding (concat)
 
--- | A lens into a single bit of a 'BV'.
+-- | A lens into a single bit of a 'Data.BitVector.Sized.Internal.BV'.
 bit :: (ix + 1 <= w) => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
 bit w w' = lens (BV.select w' knownNat) s
   where s bv (BV 1) = BV.setBit w' bv
@@ -151,11 +154,12 @@ catLens wh wl hi lo = lens g s
                 bvh = BV.select wl wh bv'
             in bv & hi .~ bvh & lo .~ bvl
 
--- | Index of a single bit of a 'BV'.
+-- | Index of a single bit of a 'Data.BitVector.Sized.Internal.BV'.
 data BVIx w ix where
   BVIx :: ix + 1 <= w => NatRepr w -> NatRepr ix -> BVIx w ix
 
 deriving instance Show (BVIx w ix)
+instance ShowF (BVIx w)
 
 instance TestEquality (BVIx w) where
   BVIx _ ix `testEquality` BVIx _ ix' = ix `testEquality` ix'
@@ -221,31 +225,28 @@ type family Slice' (i :: Nat) (w :: Nat) :: [Nat] where
   Slice' i 0 = '[]
   Slice' i w = i ': Slice' (i+1) (w-1)
 
+-- | Every element of the list is distinct.
+type AllDistinct :: [k] -> Bool
+type family AllDistinct ks where
+  AllDistinct '[] = 'True
+  AllDistinct (k:ks) = Not (Elem k ks) && AllDistinct ks
+
 -- | A list of 'BVIx' with no repeated elements. This essentially gives us a
 -- reordering of some subset of the bits in a bitvector.
 data BVView (w :: Nat) (ixs :: [Nat]) where
-  Nil :: BVView w '[]
-  (:-) :: Elem ix ixs ~ 'False
-       => BVIx w ix
-       -> BVView w ixs
-       -> BVView w (ix ': ixs)
+  BVView :: AllDistinct ixs ~ 'True => List (BVIx w) ixs -> BVView w ixs
 
-infixr 5 :-
+listLength :: List f ixs -> NatRepr (Length ixs)
+listLength Nil = knownNat
+listLength (_ :< rst) = addNat (knownNat @1) (listLength rst)
 
-bvViewLength :: BVView w ixs -> NatRepr (Length ixs)
-bvViewLength Nil = knownNat
-bvViewLength (_ :- rst) = addNat (knownNat @1) (bvViewLength rst)
+deriving instance Show (BVView w pr)
+instance ShowF (BVView w)
 
-instance KnownRepr (BVView w) '[] where
-  knownRepr = Nil
-
-instance ( ix + 1 <= w
-         , Elem ix ixs ~ 'False
-         , KnownRepr (BVView w) ixs
-         , KnownNat w
-         , KnownNat ix
-         ) => KnownRepr (BVView w) (ix ': ixs) where
-  knownRepr = knownRepr :- knownRepr
+instance ( AllDistinct ixs ~ 'True
+         , KnownRepr (List (BVIx w)) ixs
+         ) => KnownRepr (BVView w) ixs where
+  knownRepr = BVView knownRepr
 
 -- | Construct a 'BVView' when the width and indices are known at compile time.
 --
@@ -259,17 +260,17 @@ instance ( ix + 1 <= w
 --         arising from a use of ‘bvView’
 --     • In the expression: bvView @32 @'[5, 7, 5]
 --       In an equation for ‘it’: it = bvView @32 @'[5, 7, 5]
-
 bvView :: KnownRepr (BVView w) ixs => BVView w ixs
 bvView = knownRepr
 
-deriving instance Show (BVView w pr)
-
 -- | Get a lens from a 'BVView'.
 bvViewL :: BVView w ixs -> Lens' (BV w) (BV (Length ixs))
-bvViewL Nil = lens (const (BV.zero knownNat)) const
-bvViewL (BVIx w i :- rst) =
-  catLens knownNat (bvViewLength rst) (bit w i) (bvViewL rst)
+bvViewL (BVView l) = go l
+  where go :: List (BVIx w) ixs' -> Lens' (BV w) (BV (Length ixs'))
+        go = \case
+          Nil -> lens (const (BV.zero knownNat)) const
+          BVIx w i :< rst ->
+            catLens knownNat (listLength rst) (bit w i) (go rst)
 
 -- | Computes the intersection of two lists. The lists are assumed to already
 -- have no duplicates. If the first argument does have duplicates that survive
@@ -285,31 +286,31 @@ type Disjoint :: [k] -> [k] -> Bool
 type Disjoint ks ks' = Intersection ks ks' == '[]
 
 -- | The first argument is disjoint from all the lists in the second argument.
-type AllDisjoint :: [k] -> [[k]] -> Bool
-type family AllDisjoint ks kss' where
-  AllDisjoint _ '[] = 'True
-  AllDisjoint ks (ks' ': kss') =
-    Disjoint ks ks' && AllDisjoint ks kss'
+type AllDisjoint' :: [k] -> [[k]] -> Bool
+type family AllDisjoint' ks kss' where
+  AllDisjoint' _ '[] = 'True
+  AllDisjoint' ks (ks' ': kss') =
+    Disjoint ks ks' && AllDisjoint' ks kss'
+
+-- | Every list is disjoint from every other list.
+type AllDisjoint :: [[k]] -> Bool
+type family AllDisjoint kss where
+  AllDisjoint '[] = 'True
+  AllDisjoint (ks ': kss) = AllDisjoint' ks kss && AllDisjoint kss
 
 -- | A list of 'BVViews' where each 'BVView' is disjoint from the others. This
 -- is basically a decomposition of a bitvector into disjoint fields.
 data BVViews (w :: Nat) (ixss :: [[Nat]]) where
-  Nils :: BVViews w '[]
-  (:+) :: AllDisjoint ixs ixss ~ 'True
-       => BVView w ixs -> BVViews w ixss -> BVViews w (ixs ': ixss)
-
-infixr 5 :+
+  BVViews :: AllDisjoint ixss ~ 'True
+          => List (BVView w) ixss -> BVViews w ixss
 
 deriving instance Show (BVViews w ixss)
+instance ShowF (BVViews w)
 
-instance KnownRepr (BVViews w) '[] where
-  knownRepr = Nils
-
-instance ( KnownRepr (BVView w) ixs
-         , KnownRepr (BVViews w) ixss
-         , AllDisjoint ixs ixss ~ 'True
-         ) => KnownRepr (BVViews w) (ixs ': ixss) where
-  knownRepr = knownRepr :+ knownRepr
+instance ( AllDisjoint l ~ 'True
+         , KnownRepr (List (BVView w)) l
+         ) => KnownRepr (BVViews w) l where
+  knownRepr = BVViews knownRepr
 
 -- | Construct a 'BVViews' when the type is fully known at compile time.
 --
@@ -334,11 +335,10 @@ type family Lengths (kss :: [[k]]) :: [Nat] where
 
 -- | Get a lens from a 'BVViews'.
 bvViewsL :: BVViews w ixss -> Lens' (BV w) (List BV (Lengths ixss))
-bvViewsL vs = lens (g vs) (s vs)
-  where g :: BVViews w ixss' -> BV w -> List BV (Lengths ixss')
-        g Nils _ = PL.Nil
-        g (v :+ vs') bv = bv ^. bvViewL v PL.:< g vs' bv
-        s :: BVViews w ixss' -> BV w -> List BV (Lengths ixss') -> BV w
-        s Nils bv _ = bv
-        s (v :+ vs') bv (bv' PL.:< bvs') =
-          bv & bvViewsL vs' .~ bvs' & bvViewL v .~ bv'
+bvViewsL (BVViews l) = lens (g l) (s l)
+  where g :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss')
+        g Nil _ = Nil
+        g (v :< vs) bv = bv ^. bvViewL v :< g vs bv
+        s :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss') -> BV w
+        s Nil bv Nil = bv
+        s (v :< vs) bv (bv' :< bvs') = s vs bv bvs' & bvViewL v .~ bv'
