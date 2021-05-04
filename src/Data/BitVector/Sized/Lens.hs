@@ -8,6 +8,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -83,7 +84,11 @@
 --         arising from a use of ‘bvView’
 --     • In the expression: bvView :: BVView 32 (Slice 30 4)
 --       In an equation for ‘v’: v = bvView :: BVView 32 (Slice 30 4)
-
+--
+-- This library is best used for applications where the types are fully known at
+-- compile time. You don't want to write too many functions on these things, as
+-- you'll have to figure out how to prove things like @Elem ix ixs ~ 'False@ a
+-- lot.
 module Data.BitVector.Sized.Lens
   ( -- * BVIx
     BVIx(..)
@@ -98,11 +103,21 @@ module Data.BitVector.Sized.Lens
   , type Slice
   , type Slice'
   , type (++)
+    -- * BVViews
+  , BVViews(..)
+  , bvViews
+  , bvViewsL
+  , type Intersection
+  , type Disjoint
+  , type AllDisjoint
+  , type Lengths
   ) where
 
 import           Data.BitVector.Sized ( BV, pattern BV )
 import qualified Data.BitVector.Sized as BV
 import Data.Parameterized.Classes
+import           Data.Parameterized.List (List)
+import qualified Data.Parameterized.List as PL
 import Data.Parameterized.NatRepr
 import Data.Type.Bool
 import Data.Type.Equality
@@ -142,10 +157,21 @@ data BVIx w ix where
 
 deriving instance Show (BVIx w ix)
 
+instance TestEquality (BVIx w) where
+  BVIx _ ix `testEquality` BVIx _ ix' = ix `testEquality` ix'
+
+instance OrdF (BVIx w) where
+  BVIx _ ix `compareF` BVIx _ ix' = ix `compareF` ix'
+
 instance (KnownNat w, KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
   knownRepr = BVIx knownNat knownNat
 
 -- | Construct a 'BVIx' when the width and index are known at compile time.
+--
+-- >>> bvIx @32 @7
+-- BVIx 32 7
+-- >>> :type it
+-- it :: BVIx 32 7
 bvIx :: (KnownNat w, KnownNat ix, ix + 1 <= w) => BVIx w ix
 bvIx = knownRepr
 
@@ -174,6 +200,9 @@ type family (++) (as :: [k]) (bs :: [k]) :: [k] where
 -- >>> :kind! Slice 7 4
 -- Slice 7 4 :: [Nat]
 -- = '[10, 9, 8, 7]
+-- >>> v = bvView @8 @(Slice 4 2)
+-- >>> printBV $ BV.mkBV knownNat 0b01101100 & bvViewL v .~ BV.mkBV knownNat 0b01
+-- 0b1011100:[8]
 type family Slice (i :: Nat) (w :: Nat) :: [Nat] where
   Slice i 0 = '[]
   Slice i w = i + w - 1 ': Slice i (w-1)
@@ -185,6 +214,9 @@ type family Slice (i :: Nat) (w :: Nat) :: [Nat] where
 -- >>> :kind! Slice' 7 4
 -- Slice' 7 4 :: [Nat]
 -- = '[7, 8, 9, 10]
+-- >>> v = bvView @8 @(Slice' 4 2)
+-- >>> printBV $ BV.mkBV knownNat 0b01101100 & bvViewL v .~ BV.mkBV knownNat 0b10
+-- 0b1011100:[8]
 type family Slice' (i :: Nat) (w :: Nat) :: [Nat] where
   Slice' i 0 = '[]
   Slice' i w = i ': Slice' (i+1) (w-1)
@@ -193,16 +225,16 @@ type family Slice' (i :: Nat) (w :: Nat) :: [Nat] where
 -- reordering of some subset of the bits in a bitvector.
 data BVView (w :: Nat) (ixs :: [Nat]) where
   Nil :: BVView w '[]
-  (:<) :: Elem ix ixs ~ 'False
+  (:-) :: Elem ix ixs ~ 'False
        => BVIx w ix
        -> BVView w ixs
        -> BVView w (ix ': ixs)
 
-infixr 5 :<
+infixr 5 :-
 
 bvViewLength :: BVView w ixs -> NatRepr (Length ixs)
 bvViewLength Nil = knownNat
-bvViewLength (_ :< rst) = addNat (knownNat @1) (bvViewLength rst)
+bvViewLength (_ :- rst) = addNat (knownNat @1) (bvViewLength rst)
 
 instance KnownRepr (BVView w) '[] where
   knownRepr = Nil
@@ -213,9 +245,21 @@ instance ( ix + 1 <= w
          , KnownNat w
          , KnownNat ix
          ) => KnownRepr (BVView w) (ix ': ixs) where
-  knownRepr = knownRepr :< knownRepr
+  knownRepr = knownRepr :- knownRepr
 
 -- | Construct a 'BVView' when the width and indices are known at compile time.
+--
+-- >>> bvView @32 @(Slice 9 3)
+-- BVIx 32 11 :- (BVIx 32 10 :- (BVIx 32 9 :- Nil))
+-- >>> :type it
+-- it :: BVView 32 '[11, 10, 9]
+-- >>> bvView @32 @'[5, 7, 5]
+-- <interactive>:12:1: error:
+--     • Couldn't match type ‘'True’ with ‘'False’
+--         arising from a use of ‘bvView’
+--     • In the expression: bvView @32 @'[5, 7, 5]
+--       In an equation for ‘it’: it = bvView @32 @'[5, 7, 5]
+
 bvView :: KnownRepr (BVView w) ixs => BVView w ixs
 bvView = knownRepr
 
@@ -224,5 +268,77 @@ deriving instance Show (BVView w pr)
 -- | Get a lens from a 'BVView'.
 bvViewL :: BVView w ixs -> Lens' (BV w) (BV (Length ixs))
 bvViewL Nil = lens (const (BV.zero knownNat)) const
-bvViewL (BVIx w i :< rst) =
+bvViewL (BVIx w i :- rst) =
   catLens knownNat (bvViewLength rst) (bit w i) (bvViewL rst)
+
+-- | Computes the intersection of two lists. The lists are assumed to already
+-- have no duplicates. If the first argument does have duplicates that survive
+-- the intersection operation, the result will have the same duplicates as well.
+type Intersection :: [k] -> [k] -> [k]
+type family Intersection ks ks' where
+  Intersection '[] _ = '[]
+  Intersection (k:ks) ks' =
+    If (Elem k ks') (k ': Intersection ks ks') (Intersection ks ks')
+
+-- | Two lists are disjoint.
+type Disjoint :: [k] -> [k] -> Bool
+type Disjoint ks ks' = Intersection ks ks' == '[]
+
+-- | The first argument is disjoint from all the lists in the second argument.
+type AllDisjoint :: [k] -> [[k]] -> Bool
+type family AllDisjoint ks kss' where
+  AllDisjoint _ '[] = 'True
+  AllDisjoint ks (ks' ': kss') =
+    Disjoint ks ks' && AllDisjoint ks kss'
+
+-- | A list of 'BVViews' where each 'BVView' is disjoint from the others. This
+-- is basically a decomposition of a bitvector into disjoint fields.
+data BVViews (w :: Nat) (ixss :: [[Nat]]) where
+  Nils :: BVViews w '[]
+  (:+) :: AllDisjoint ixs ixss ~ 'True
+       => BVView w ixs -> BVViews w ixss -> BVViews w (ixs ': ixss)
+
+infixr 5 :+
+
+deriving instance Show (BVViews w ixss)
+
+instance KnownRepr (BVViews w) '[] where
+  knownRepr = Nils
+
+instance ( KnownRepr (BVView w) ixs
+         , KnownRepr (BVViews w) ixss
+         , AllDisjoint ixs ixss ~ 'True
+         ) => KnownRepr (BVViews w) (ixs ': ixss) where
+  knownRepr = knownRepr :+ knownRepr
+
+-- | Construct a 'BVViews' when the type is fully known at compile time.
+--
+-- >>> bvViews @32 @'[Slice 9 3, Slice' 14 2]
+-- (BVIx 32 11 :- (BVIx 32 10 :- (BVIx 32 9 :- Nil))) :+ ((BVIx 32 14 :- (BVIx 32 15 :- Nil)) :+ Nils)
+-- >>> :type it
+-- it :: BVViews 32 '[ '[11, 10, 9], '[14, 15]]
+-- >>> bvViews @32 @'[Slice 0 3, Slice 2 2]
+-- <interactive>:4:1: error:
+--     • Couldn't match type ‘'False’ with ‘'True’
+--         arising from a use of ‘bvViews’
+--     • In the expression: bvViews @32 @'[Slice 0 3, Slice 2 2]
+--       In an equation for ‘it’: it = bvViews @32 @'[Slice 0 3, Slice 2 2]
+bvViews :: KnownRepr (BVViews w) ixss => BVViews w ixss
+bvViews = knownRepr
+
+-- | 'Length' mapped over a list to produce a list of lengths.
+type Lengths :: [[k]] -> [Nat]
+type family Lengths (kss :: [[k]]) :: [Nat] where
+  Lengths '[] = '[]
+  Lengths (ks ': kss) = Length ks ': Lengths kss
+
+-- | Get a lens from a 'BVViews'.
+bvViewsL :: BVViews w ixss -> Lens' (BV w) (List BV (Lengths ixss))
+bvViewsL vs = lens (g vs) (s vs)
+  where g :: BVViews w ixss' -> BV w -> List BV (Lengths ixss')
+        g Nils _ = PL.Nil
+        g (v :+ vs') bv = bv ^. bvViewL v PL.:< g vs' bv
+        s :: BVViews w ixss' -> BV w -> List BV (Lengths ixss') -> BV w
+        s Nils bv _ = bv
+        s (v :+ vs') bv (bv' PL.:< bvs') =
+          bv & bvViewsL vs' .~ bvs' & bvViewL v .~ bv'
