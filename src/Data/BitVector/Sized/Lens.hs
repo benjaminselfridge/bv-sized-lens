@@ -166,7 +166,7 @@ instance OrdF (BVIx w) where
 instance (KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
   knownRepr = BVIx knownNat
 
--- | Construct a 'BVIx' when the width and index are known at compile time.
+-- | Construct a 'BVIx' when the index is known at compile time.
 --
 -- >>> bvIx @32 @7
 -- BVIx 32 7
