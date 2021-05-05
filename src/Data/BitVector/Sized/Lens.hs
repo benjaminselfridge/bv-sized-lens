@@ -156,32 +156,32 @@ catLens wh wl hi lo = lens g s
 
 -- | Index of a single bit of a 'Data.BitVector.Sized.Internal.BV'.
 data BVIx w ix where
-  BVIx :: ix + 1 <= w => NatRepr w -> NatRepr ix -> BVIx w ix
+  BVIx :: ix + 1 <= w => NatRepr ix -> BVIx w ix
 
 deriving instance Show (BVIx w ix)
 instance ShowF (BVIx w)
 
 instance TestEquality (BVIx w) where
-  BVIx _ ix `testEquality` BVIx _ ix' = ix `testEquality` ix'
+  BVIx ix `testEquality` BVIx ix' = ix `testEquality` ix'
 
 instance OrdF (BVIx w) where
-  BVIx _ ix `compareF` BVIx _ ix' = ix `compareF` ix'
+  BVIx ix `compareF` BVIx ix' = ix `compareF` ix'
 
-instance (KnownNat w, KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
-  knownRepr = BVIx knownNat knownNat
+instance (KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
+  knownRepr = BVIx knownNat
 
--- | Construct a 'BVIx' when the width and index are known at compile time.
+-- | Construct a 'BVIx' when the index is known at compile time.
 --
 -- >>> bvIx @32 @7
 -- BVIx 32 7
 -- >>> :type it
 -- it :: BVIx 32 7
-bvIx :: (KnownNat w, KnownNat ix, ix + 1 <= w) => BVIx w ix
+bvIx :: (KnownNat ix, ix + 1 <= w) => BVIx w ix
 bvIx = knownRepr
 
 -- | Get a lens from a 'BVIx'.
-bvIxL :: BVIx w ix -> Lens' (BV w) (BV 1)
-bvIxL (BVIx w i) = bit w i
+bvIxL :: KnownNat w => BVIx w ix -> Lens' (BV w) (BV 1)
+bvIxL (BVIx i) = bit knownNat i
 
 -- | Type-level list membership.
 type family Elem (a :: k) (l :: [k]) :: Bool where
@@ -264,13 +264,13 @@ bvView :: KnownRepr (BVView w) ixs => BVView w ixs
 bvView = knownRepr
 
 -- | Get a lens from a 'BVView'.
-bvViewL :: BVView w ixs -> Lens' (BV w) (BV (Length ixs))
+bvViewL :: forall w ixs . KnownNat w => BVView w ixs -> Lens' (BV w) (BV (Length ixs))
 bvViewL (BVView l) = go l
   where go :: List (BVIx w) ixs' -> Lens' (BV w) (BV (Length ixs'))
         go = \case
           Nil -> lens (const (BV.zero knownNat)) const
-          BVIx w i :< rst ->
-            catLens knownNat (listLength rst) (bit w i) (go rst)
+          BVIx i :< rst ->
+            catLens knownNat (listLength rst) (bit (knownNat @w) i) (go rst)
 
 -- | Computes the intersection of two lists. The lists are assumed to already
 -- have no duplicates. If the first argument does have duplicates that survive
@@ -334,7 +334,8 @@ type family Lengths (kss :: [[k]]) :: [Nat] where
   Lengths (ks ': kss) = Length ks ': Lengths kss
 
 -- | Get a lens from a 'BVViews'.
-bvViewsL :: BVViews w ixss -> Lens' (BV w) (List BV (Lengths ixss))
+bvViewsL :: forall w ixss . KnownNat w
+         => BVViews w ixss -> Lens' (BV w) (List BV (Lengths ixss))
 bvViewsL (BVViews l) = lens (g l) (s l)
   where g :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss')
         g Nil _ = Nil
