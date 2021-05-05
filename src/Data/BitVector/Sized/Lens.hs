@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -127,11 +128,25 @@ import Data.Type.Equality
 import Control.Lens.Getter
 import Control.Lens.Lens
 import Control.Lens.Setter
-import GHC.TypeNats
+import GHC.Exts (Constraint)
+import GHC.TypeLits
 import Prelude hiding (concat)
 
+type ValidIx' :: Nat -> Nat -> Bool
+type family ValidIx' ix w where
+  ValidIx' ix w = If (ix + 1 <=? w) 'True
+    (TypeError
+     ('Text "Invalid index " ':<>:
+      'ShowType ix ':<>:
+      'Text " into BV " ':<>:
+      'ShowType w))
+
+type ValidIx :: Nat -> Nat -> Constraint
+class (ValidIx' ix w ~ 'True, ix + 1 <= w) => ValidIx ix w
+instance (ValidIx' ix w ~ 'True, ix + 1 <= w) => ValidIx ix w
+
 -- | A lens into a single bit of a 'Data.BitVector.Sized.Internal.BV'.
-bit :: (ix + 1 <= w) => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
+bit :: ValidIx ix w => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
 bit w w' = lens (BV.select w' knownNat) s
   where s bv (BV 1) = BV.setBit w' bv
         s bv _      = BV.clearBit w w' bv
@@ -156,7 +171,7 @@ catLens wh wl hi lo = lens g s
 
 -- | Index of a single bit of a 'Data.BitVector.Sized.Internal.BV'.
 data BVIx w ix where
-  BVIx :: ix + 1 <= w => NatRepr ix -> BVIx w ix
+  BVIx :: ValidIx ix w => NatRepr ix -> BVIx w ix
 
 deriving instance Show (BVIx w ix)
 instance ShowF (BVIx w)
@@ -167,7 +182,7 @@ instance TestEquality (BVIx w) where
 instance OrdF (BVIx w) where
   BVIx ix `compareF` BVIx ix' = ix `compareF` ix'
 
-instance (KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
+instance (KnownNat ix, ValidIx ix w) => KnownRepr (BVIx w) ix where
   knownRepr = BVIx knownNat
 
 -- | Construct a 'BVIx' when the index is known at compile time.
@@ -176,7 +191,7 @@ instance (KnownNat ix, ix + 1 <= w) => KnownRepr (BVIx w) ix where
 -- BVIx 32 7
 -- >>> :type it
 -- it :: BVIx 32 7
-bvIx :: (KnownNat ix, ix + 1 <= w) => BVIx w ix
+bvIx :: forall w ix . (KnownNat ix, ValidIx ix w) => BVIx w ix
 bvIx = knownRepr
 
 -- | Get a lens from a 'BVIx'.
