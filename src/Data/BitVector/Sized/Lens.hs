@@ -133,8 +133,8 @@ import GHC.TypeLits
 import Prelude hiding (concat)
 
 type ValidIx' :: Nat -> Nat -> Bool
-type family ValidIx' ix w where
-  ValidIx' ix w = If (ix + 1 <=? w) 'True
+type family ValidIx' w ix where
+  ValidIx' w ix = If (ix + 1 <=? w) 'True
     (TypeError
      ('Text "Invalid index " ':<>:
       'ShowType ix ':<>:
@@ -142,11 +142,11 @@ type family ValidIx' ix w where
       'ShowType w))
 
 type ValidIx :: Nat -> Nat -> Constraint
-class (ValidIx' ix w ~ 'True, ix + 1 <= w) => ValidIx ix w
-instance (ValidIx' ix w ~ 'True, ix + 1 <= w) => ValidIx ix w
+class ix + 1 <= w => ValidIx w ix
+instance (ValidIx' w ix ~ 'True, ix + 1 <= w) => ValidIx w ix
 
 -- | A lens into a single bit of a 'Data.BitVector.Sized.Internal.BV'.
-bit :: ValidIx ix w => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
+bit :: ValidIx w ix => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
 bit w w' = lens (BV.select w' knownNat) s
   where s bv (BV 1) = BV.setBit w' bv
         s bv _      = BV.clearBit w w' bv
@@ -171,7 +171,7 @@ catLens wh wl hi lo = lens g s
 
 -- | Index of a single bit of a 'Data.BitVector.Sized.Internal.BV'.
 data BVIx w ix where
-  BVIx :: ValidIx ix w => NatRepr ix -> BVIx w ix
+  BVIx :: ValidIx w ix => NatRepr ix -> BVIx w ix
 
 deriving instance Show (BVIx w ix)
 instance ShowF (BVIx w)
@@ -182,7 +182,7 @@ instance TestEquality (BVIx w) where
 instance OrdF (BVIx w) where
   BVIx ix `compareF` BVIx ix' = ix `compareF` ix'
 
-instance (KnownNat ix, ValidIx ix w) => KnownRepr (BVIx w) ix where
+instance (KnownNat ix, ValidIx w ix) => KnownRepr (BVIx w) ix where
   knownRepr = BVIx knownNat
 
 -- | Construct a 'BVIx' when the index is known at compile time.
@@ -191,7 +191,7 @@ instance (KnownNat ix, ValidIx ix w) => KnownRepr (BVIx w) ix where
 -- BVIx 32 7
 -- >>> :type it
 -- it :: BVIx 32 7
-bvIx :: forall w ix . (KnownNat ix, ValidIx ix w) => BVIx w ix
+bvIx :: forall w ix . (KnownNat ix, ValidIx w ix) => BVIx w ix
 bvIx = knownRepr
 
 -- | Get a lens from a 'BVIx'.
@@ -246,10 +246,18 @@ type family AllDistinct ks where
   AllDistinct '[] = 'True
   AllDistinct (k:ks) = Not (Elem k ks) && AllDistinct ks
 
+type family ValidView' ixs where
+  ValidView' ixs = If (AllDistinct ixs) 'True
+    (TypeError (('Text "Invalid index list: " ':<>: 'ShowType ixs ':$$:
+                 'Text "(repeated indices)")))
+
+class AllDistinct ixs ~ 'True => ValidView ixs
+instance (ValidView' ixs ~ 'True, AllDistinct ixs ~ 'True) => ValidView ixs
+
 -- | A list of 'BVIx' with no repeated elements. This essentially gives us a
 -- reordering of some subset of the bits in a bitvector.
 data BVView (w :: Nat) (ixs :: [Nat]) where
-  BVView :: AllDistinct ixs ~ 'True => List (BVIx w) ixs -> BVView w ixs
+  BVView :: ValidView ixs => List (BVIx w) ixs -> BVView w ixs
 
 listLength :: List f ixs -> NatRepr (Length ixs)
 listLength Nil = knownNat
@@ -258,7 +266,7 @@ listLength (_ :< rst) = addNat (knownNat @1) (listLength rst)
 deriving instance Show (BVView w pr)
 instance ShowF (BVView w)
 
-instance ( AllDistinct ixs ~ 'True
+instance ( ValidView ixs
          , KnownRepr (List (BVIx w)) ixs
          ) => KnownRepr (BVView w) ixs where
   knownRepr = BVView knownRepr
@@ -275,7 +283,7 @@ instance ( AllDistinct ixs ~ 'True
 --         arising from a use of ‘bvView’
 --     • In the expression: bvView @32 @'[5, 7, 5]
 --       In an equation for ‘it’: it = bvView @32 @'[5, 7, 5]
-bvView :: KnownRepr (BVView w) ixs => BVView w ixs
+bvView :: forall w ixs . (KnownRepr (BVView w) ixs, ValidView ixs) => BVView w ixs
 bvView = knownRepr
 
 -- | Get a lens from a 'BVView'.
@@ -313,16 +321,23 @@ type family AllDisjoint kss where
   AllDisjoint '[] = 'True
   AllDisjoint (ks ': kss) = AllDisjoint' ks kss && AllDisjoint kss
 
+type family ValidViews' kss where
+  ValidViews' kss = If (AllDisjoint kss) 'True
+    (TypeError (('Text "Invalid index lists " ':<>: 'ShowType kss) ':$$:
+                 'Text "(not all lists are disjoint)"))
+
+class AllDisjoint kss ~ 'True => ValidViews kss
+instance (ValidViews' kss ~ 'True, AllDisjoint kss ~ 'True) => ValidViews kss
+
 -- | A list of 'BVViews' where each 'BVView' is disjoint from the others. This
 -- is basically a decomposition of a bitvector into disjoint fields.
 data BVViews (w :: Nat) (ixss :: [[Nat]]) where
-  BVViews :: AllDisjoint ixss ~ 'True
-          => List (BVView w) ixss -> BVViews w ixss
+  BVViews :: ValidViews ixss => List (BVView w) ixss -> BVViews w ixss
 
 deriving instance Show (BVViews w ixss)
 instance ShowF (BVViews w)
 
-instance ( AllDisjoint l ~ 'True
+instance ( ValidViews l
          , KnownRepr (List (BVView w)) l
          ) => KnownRepr (BVViews w) l where
   knownRepr = BVViews knownRepr
@@ -339,7 +354,7 @@ instance ( AllDisjoint l ~ 'True
 --         arising from a use of ‘bvViews’
 --     • In the expression: bvViews @32 @'[Slice 0 3, Slice 2 2]
 --       In an equation for ‘it’: it = bvViews @32 @'[Slice 0 3, Slice 2 2]
-bvViews :: KnownRepr (BVViews w) ixss => BVViews w ixss
+bvViews :: forall w ixss . (KnownRepr (BVViews w) ixss, ValidViews ixss) => BVViews w ixss
 bvViews = knownRepr
 
 -- | 'Length' mapped over a list to produce a list of lengths.
