@@ -75,24 +75,26 @@
 -- where a bit index is repeated or out of range):
 --
 -- >>> v = bvView @32 @('[5] ++ Slice 3 4)
--- <interactive>:1:5: error:
+-- <interactive>:37:5: error:
 --     • Invalid index list: '[5, 6, 5, 4, 3]
---       (repeated indices)
+--       (repeated index 5)
 --     • In the expression: bvView @32 @('[5] ++ Slice 3 4)
 --       In an equation for ‘v’: v = bvView @32 @('[5] ++ Slice 3 4)
 -- >>> v = bvView @32 @(Slice 30 4)
--- <interactive>:23:5: error:
+-- <interactive>:1:5: error:
 --     • Invalid index 33 into BV 32
+--       index must be strictly smaller than bitvector width
 --     • In the expression: bvView @32 @(Slice 30 4)
 --       In an equation for ‘v’: v = bvView @32 @(Slice 30 4)
-
--- <interactive>:23:5: error:
+-- <interactive>:1:5: error:
 --     • Invalid index 32 into BV 32
+--       index must be strictly smaller than bitvector width
 --     • In the expression: bvView @32 @(Slice 30 4)
 --       In an equation for ‘v’: v = bvView @32 @(Slice 30 4)
 --
--- Don't attempt to use this library unless all your type-level indices are
--- known at compile time.
+-- __WARNING__: Don't attempt to use this library unless all your type-level
+-- indices are known at compile time. If you try abstracting over 'BVView',
+-- you're gonna have a bad time.
 module Data.BitVector.Sized.Lens
   ( -- * BVIx
     BVIx
@@ -134,10 +136,9 @@ type ValidIx' :: Nat -> Nat -> Bool
 type family ValidIx' w ix where
   ValidIx' w ix = If (ix + 1 <=? w) 'True
     (TypeError
-     ('Text "Invalid index " ':<>:
-      'ShowType ix ':<>:
-      'Text " into BV " ':<>:
-      'ShowType w))
+     (('Text "Invalid index " ':<>: 'ShowType ix ':<>:
+       'Text " into BV " ':<>: 'ShowType w) ':$$:
+      ('Text "index must be strictly smaller than bitvector width")))
 
 type ValidIx :: Nat -> Nat -> Constraint
 class ix + 1 <= w => ValidIx w ix
@@ -201,6 +202,160 @@ type family Elem (a :: k) (l :: [k]) :: Bool where
   Elem _ '[]    = 'False
   Elem a (k:ks) = a == k || Elem a ks
 
+type family FindDuplicate (ks :: [k]) :: Maybe k where
+  FindDuplicate '[] = 'Nothing
+  FindDuplicate (k:ks) = If (Elem k ks) ('Just k) (FindDuplicate ks)
+
+type family CheckFindDuplicateResult ixs mix where
+  CheckFindDuplicateResult _ 'Nothing = 'True
+  CheckFindDuplicateResult ixs ('Just ix) =
+    TypeError (('Text "Invalid index list: " ':<>: 'ShowType ixs ':$$:
+                'Text "(repeated index " ':<>: 'ShowType ix ':<>: 'Text ")"))
+
+type family ValidView' ixs where
+  ValidView' ixs = CheckFindDuplicateResult ixs (FindDuplicate ixs)
+
+class ValidView' ixs ~ 'True => ValidView ixs
+instance ValidView' ixs ~ 'True => ValidView ixs
+
+-- | A list of 'BVIx' with no repeated elements. This essentially gives us a
+-- reordering of some subset of the bits in a bitvector.
+data BVView (w :: Nat) (ixs :: [Nat]) where
+  BVView :: ValidView ixs => List (BVIx w) ixs -> BVView w ixs
+
+listLength :: List f ixs -> NatRepr (Length ixs)
+listLength Nil = knownNat
+listLength (_ :< rst) = addNat (knownNat @1) (listLength rst)
+
+deriving instance Show (BVView w pr)
+instance ShowF (BVView w)
+
+instance ( ValidView ixs
+         , KnownRepr (List (BVIx w)) ixs
+         ) => KnownRepr (BVView w) ixs where
+  knownRepr = BVView knownRepr
+
+-- | Construct a 'BVView' when the width and indices are known at compile time.
+--
+-- >>> bvView @32 @(Slice 9 3)
+-- BVView (BVIx 11 :< BVIx 10 :< BVIx 9 :< Nil)
+-- >>> :type it
+-- it :: BVView 32 '[11, 10, 9]
+-- >>> bvView @32 @'[5, 7, 5]
+-- <interactive>:19:1: error:
+--     • Invalid index list: '[5, 7, 5]
+--       (repeated index 5)
+--     • In the expression: bvView @32 @'[5, 7, 5]
+--       In an equation for ‘it’: it = bvView @32 @'[5, 7, 5]
+bvView :: forall w ixs . (KnownRepr (BVView w) ixs, ValidView ixs) => BVView w ixs
+bvView = knownRepr
+
+-- | Get a lens from a 'BVView'.
+bvViewL :: forall w ixs . KnownNat w => BVView w ixs -> Lens' (BV w) (BV (Length ixs))
+bvViewL (BVView l) = go l
+  where go :: List (BVIx w) ixs' -> Lens' (BV w) (BV (Length ixs'))
+        go = \case
+          Nil -> lens (const (BV.zero knownNat)) const
+          BVIx i :< rst ->
+            catLens knownNat (listLength rst) (bit (knownNat @w) i) (go rst)
+
+-- | Computes the intersection of two lists. The lists are assumed to already
+-- have no duplicates. If the first argument does have duplicates that survive
+-- the intersection operation, the result will have the same duplicates as well.
+type Intersection :: [k] -> [k] -> [k]
+type family Intersection ks ks' where
+  Intersection '[] _ = '[]
+  Intersection (k:ks) ks' =
+    If (Elem k ks') (k ': Intersection ks ks') (Intersection ks ks')
+
+-- | Two lists are disjoint.
+type Disjoint :: [k] -> [k] -> Bool
+type Disjoint ks ks' = Intersection ks ks' == '[]
+
+type FindIntersecting' :: [k] -> [[k]] -> Maybe [k]
+type family FindIntersecting' ks kss where
+  FindIntersecting' _ '[] = 'Nothing
+  FindIntersecting' ks (ks' ': kss') =
+    If (Disjoint ks ks') (FindIntersecting' ks kss') ('Just ks')
+
+type MergeFstMaybe :: k -> Maybe k -> Maybe (k, k)
+type family MergeFstMaybe k mk where
+  MergeFstMaybe _ 'Nothing = 'Nothing
+  MergeFstMaybe k ('Just k') = 'Just '(k, k')
+
+type (<>) :: Maybe k -> Maybe k -> Maybe k
+type family mk <> mk' where
+  'Nothing <> mk' = mk'
+  'Just k <> _ = 'Just k
+
+type FindIntersecting :: [[k]] -> Maybe ([k],[k])
+type family FindIntersecting kss where
+  FindIntersecting '[] = 'Nothing
+  FindIntersecting (ks ': kss) =
+    MergeFstMaybe ks (FindIntersecting' ks kss) <>
+    FindIntersecting kss
+
+type family CheckFindIntersectingResult kss m where
+  CheckFindIntersectingResult _ 'Nothing = 'True
+  CheckFindIntersectingResult kss ('Just '(ks, ks')) =
+    TypeError (('Text "Invalid index lists " ':<>: 'ShowType kss) ':$$:
+               ('Text "Lists " ':<>: 'ShowType ks ':<>:
+                'Text " and " ':<>: 'ShowType ks' ':<>: 'Text " are not disjoint") ':$$:
+               ('Text "(their intersection is " ':<>: 'ShowType (Intersection ks ks') ':<>:
+                'Text ")"))
+
+type family ValidViews' kss where
+  ValidViews' kss = CheckFindIntersectingResult kss (FindIntersecting kss)
+
+class ValidViews' kss ~ 'True => ValidViews kss
+instance (ValidViews' kss ~ 'True) => ValidViews kss
+
+-- | A list of 'BVViews' where each 'BVView' is disjoint from the others. This
+-- is basically a decomposition of a bitvector into disjoint fields.
+data BVViews (w :: Nat) (ixss :: [[Nat]]) where
+  BVViews :: ValidViews ixss => List (BVView w) ixss -> BVViews w ixss
+
+deriving instance Show (BVViews w ixss)
+instance ShowF (BVViews w)
+
+instance ( ValidViews l
+         , KnownRepr (List (BVView w)) l
+         ) => KnownRepr (BVViews w) l where
+  knownRepr = BVViews knownRepr
+
+-- | Construct a 'BVViews' when the type is fully known at compile time.
+--
+-- >>> bvViews @32 @'[Slice 9 3, Slice' 14 2]
+-- BVViews (BVView (BVIx 11 :< BVIx 10 :< BVIx 9 :< Nil) :< BVView (BVIx 14 :< BVIx 15 :< Nil) :< Nil)
+-- >>> :type it
+-- it :: BVViews 32 '[ '[11, 10, 9], '[14, 15]]
+-- >>> bvViews @32 @'[Slice 0 3, Slice 2 2]
+-- <interactive>:3:1: error:
+--     • Invalid index lists '[ '[2, 1, 0], '[3, 2]]
+--       Lists '[2, 1, 0] and '[3, 2] are not disjoint
+--       (their intersection is '[2])
+--     • In the expression: bvViews @32 @'[Slice 0 3, Slice 2 2]
+--       In an equation for ‘it’: it = bvViews @32 @'[Slice 0 3, Slice 2 2]
+bvViews :: forall w ixss . (KnownRepr (BVViews w) ixss, ValidViews ixss) => BVViews w ixss
+bvViews = knownRepr
+
+-- | 'Length' mapped over a list to produce a list of lengths.
+type Lengths :: [[k]] -> [Nat]
+type family Lengths (kss :: [[k]]) :: [Nat] where
+  Lengths '[] = '[]
+  Lengths (ks ': kss) = Length ks ': Lengths kss
+
+-- | Get a lens from a 'BVViews'.
+bvViewsL :: forall w ixss . KnownNat w
+         => BVViews w ixss -> Lens' (BV w) (List BV (Lengths ixss))
+bvViewsL (BVViews l) = lens (g l) (s l)
+  where g :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss')
+        g Nil _ = Nil
+        g (v :< vs) bv = bv ^. bvViewL v :< g vs bv
+        s :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss') -> BV w
+        s Nil bv Nil = bv
+        s (v :< vs) bv (bv' :< bvs') = s vs bv bvs' & bvViewL v .~ bv'
+
 -- | Type-level list length.
 type family Length (l :: [k]) :: Nat where
   Length '[] = 0
@@ -237,137 +392,3 @@ type family Slice (i :: Nat) (w :: Nat) :: [Nat] where
 type family Slice' (i :: Nat) (w :: Nat) :: [Nat] where
   Slice' i 0 = '[]
   Slice' i w = i ': Slice' (i+1) (w-1)
-
--- | Every element of the list is distinct.
-type AllDistinct :: [k] -> Bool
-type family AllDistinct ks where
-  AllDistinct '[] = 'True
-  AllDistinct (k:ks) = Not (Elem k ks) && AllDistinct ks
-
-type family ValidView' ixs where
-  ValidView' ixs = If (AllDistinct ixs) 'True
-    (TypeError (('Text "Invalid index list: " ':<>: 'ShowType ixs ':$$:
-                 'Text "(repeated indices)")))
-
-class AllDistinct ixs ~ 'True => ValidView ixs
-instance (ValidView' ixs ~ 'True, AllDistinct ixs ~ 'True) => ValidView ixs
-
--- | A list of 'BVIx' with no repeated elements. This essentially gives us a
--- reordering of some subset of the bits in a bitvector.
-data BVView (w :: Nat) (ixs :: [Nat]) where
-  BVView :: ValidView ixs => List (BVIx w) ixs -> BVView w ixs
-
-listLength :: List f ixs -> NatRepr (Length ixs)
-listLength Nil = knownNat
-listLength (_ :< rst) = addNat (knownNat @1) (listLength rst)
-
-deriving instance Show (BVView w pr)
-instance ShowF (BVView w)
-
-instance ( ValidView ixs
-         , KnownRepr (List (BVIx w)) ixs
-         ) => KnownRepr (BVView w) ixs where
-  knownRepr = BVView knownRepr
-
--- | Construct a 'BVView' when the width and indices are known at compile time.
---
--- >>> bvView @32 @(Slice 9 3)
--- BVView (BVIx 11 :< BVIx 10 :< BVIx 9 :< Nil)
--- >>> :type it
--- it :: BVView 32 '[11, 10, 9]
--- >>> bvView @32 @'[5, 7, 5]
--- <interactive>:19:1: error:
---     • Invalid index list: '[5, 7, 5]
---       (repeated indices)
---     • In the expression: bvView @32 @'[5, 7, 5]
---       In an equation for ‘it’: it = bvView @32 @'[5, 7, 5]
-bvView :: forall w ixs . (KnownRepr (BVView w) ixs, ValidView ixs) => BVView w ixs
-bvView = knownRepr
-
--- | Get a lens from a 'BVView'.
-bvViewL :: forall w ixs . KnownNat w => BVView w ixs -> Lens' (BV w) (BV (Length ixs))
-bvViewL (BVView l) = go l
-  where go :: List (BVIx w) ixs' -> Lens' (BV w) (BV (Length ixs'))
-        go = \case
-          Nil -> lens (const (BV.zero knownNat)) const
-          BVIx i :< rst ->
-            catLens knownNat (listLength rst) (bit (knownNat @w) i) (go rst)
-
--- | Computes the intersection of two lists. The lists are assumed to already
--- have no duplicates. If the first argument does have duplicates that survive
--- the intersection operation, the result will have the same duplicates as well.
-type Intersection :: [k] -> [k] -> [k]
-type family Intersection ks ks' where
-  Intersection '[] _ = '[]
-  Intersection (k:ks) ks' =
-    If (Elem k ks') (k ': Intersection ks ks') (Intersection ks ks')
-
--- | Two lists are disjoint.
-type Disjoint :: [k] -> [k] -> Bool
-type Disjoint ks ks' = Intersection ks ks' == '[]
-
--- | The first argument is disjoint from all the lists in the second argument.
-type AllDisjoint' :: [k] -> [[k]] -> Bool
-type family AllDisjoint' ks kss' where
-  AllDisjoint' _ '[] = 'True
-  AllDisjoint' ks (ks' ': kss') =
-    Disjoint ks ks' && AllDisjoint' ks kss'
-
--- | Every list is disjoint from every other list.
-type AllDisjoint :: [[k]] -> Bool
-type family AllDisjoint kss where
-  AllDisjoint '[] = 'True
-  AllDisjoint (ks ': kss) = AllDisjoint' ks kss && AllDisjoint kss
-
-type family ValidViews' kss where
-  ValidViews' kss = If (AllDisjoint kss) 'True
-    (TypeError (('Text "Invalid index lists " ':<>: 'ShowType kss) ':$$:
-                 'Text "(not all lists are disjoint)"))
-
-class AllDisjoint kss ~ 'True => ValidViews kss
-instance (ValidViews' kss ~ 'True, AllDisjoint kss ~ 'True) => ValidViews kss
-
--- | A list of 'BVViews' where each 'BVView' is disjoint from the others. This
--- is basically a decomposition of a bitvector into disjoint fields.
-data BVViews (w :: Nat) (ixss :: [[Nat]]) where
-  BVViews :: ValidViews ixss => List (BVView w) ixss -> BVViews w ixss
-
-deriving instance Show (BVViews w ixss)
-instance ShowF (BVViews w)
-
-instance ( ValidViews l
-         , KnownRepr (List (BVView w)) l
-         ) => KnownRepr (BVViews w) l where
-  knownRepr = BVViews knownRepr
-
--- | Construct a 'BVViews' when the type is fully known at compile time.
---
--- >>> bvViews @32 @'[Slice 9 3, Slice' 14 2]
--- BVViews (BVView (BVIx 11 :< BVIx 10 :< BVIx 9 :< Nil) :< BVView (BVIx 14 :< BVIx 15 :< Nil) :< Nil)
--- >>> :type it
--- it :: BVViews 32 '[ '[11, 10, 9], '[14, 15]]
--- >>> bvViews @32 @'[Slice 0 3, Slice 2 2]
--- <interactive>:22:1: error:
---     • Invalid index lists '[ '[2, 1, 0], '[3, 2]]
---       (not all lists are disjoint)
---     • In the expression: bvViews @32 @'[Slice 0 3, Slice 2 2]
---       In an equation for ‘it’: it = bvViews @32 @'[Slice 0 3, Slice 2 2]
-bvViews :: forall w ixss . (KnownRepr (BVViews w) ixss, ValidViews ixss) => BVViews w ixss
-bvViews = knownRepr
-
--- | 'Length' mapped over a list to produce a list of lengths.
-type Lengths :: [[k]] -> [Nat]
-type family Lengths (kss :: [[k]]) :: [Nat] where
-  Lengths '[] = '[]
-  Lengths (ks ': kss) = Length ks ': Lengths kss
-
--- | Get a lens from a 'BVViews'.
-bvViewsL :: forall w ixss . KnownNat w
-         => BVViews w ixss -> Lens' (BV w) (List BV (Lengths ixss))
-bvViewsL (BVViews l) = lens (g l) (s l)
-  where g :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss')
-        g Nil _ = Nil
-        g (v :< vs) bv = bv ^. bvViewL v :< g vs bv
-        s :: List (BVView w) ixss' -> BV w -> List BV (Lengths ixss') -> BV w
-        s Nil bv Nil = bv
-        s (v :< vs) bv (bv' :< bvs') = s vs bv bvs' & bvViewL v .~ bv'
