@@ -19,7 +19,7 @@
 -- | This module provides a convenient lens from a larger bitvector into a
 -- smaller one:
 --
--- >>> v = bvView :: BVView 4 '[3, 0, 1]
+-- >>> v = bvView @4 @'[3, 0, 1]
 --
 -- @v@ is the "view" into a @BV 4@ that you get by extracting the bits at
 -- indices @3@, @0@, and @1@ (in order of most-significant to least-significant
@@ -53,7 +53,7 @@
 -- throughout the rest of the instruction. We can create a view of the three
 -- fields like so:
 --
--- >>> opcode = bvView :: BVView 32 (Slice 0 7)
+-- >>> opcode = bvView @32 @(Slice 0 7)
 -- >>> rd = bvView :: BVView 32 (Slice 7 5)
 -- >>> imm = bvView :: BVView 32 ('[31] ++ Slice 12 8 ++ '[20] ++ Slice 21 10)
 --
@@ -74,48 +74,46 @@
 -- The type system prevents you from creating an invalid view (for instance,
 -- where a bit index is repeated or out of range):
 --
--- >>> v = bvView :: BVView 32 ('[5] ++ Slice 3 4)
+-- >>> v = bvView @32 @('[5] ++ Slice 3 4)
 -- <interactive>:1:5: error:
---     • Couldn't match type ‘'True’ with ‘'False’
---         arising from a use of ‘bvView’
---     • In the expression: bvView :: BVView 32 ('[5] ++ Slice 3 4)
---       In an equation for ‘v’: v = bvView :: BVView 32 ('[5] ++ Slice 3 4)
--- >>> v = bvView :: BVView 32 (Slice 30 4)
--- <interactive>:2:5: error:
---     • Couldn't match type ‘'False’ with ‘'True’
---         arising from a use of ‘bvView’
---     • In the expression: bvView :: BVView 32 (Slice 30 4)
---       In an equation for ‘v’: v = bvView :: BVView 32 (Slice 30 4)
+--     • Invalid index list: '[5, 6, 5, 4, 3]
+--       (repeated indices)
+--     • In the expression: bvView @32 @('[5] ++ Slice 3 4)
+--       In an equation for ‘v’: v = bvView @32 @('[5] ++ Slice 3 4)
+-- >>> v = bvView @32 @(Slice 30 4)
+-- <interactive>:23:5: error:
+--     • Invalid index 33 into BV 32
+--     • In the expression: bvView @32 @(Slice 30 4)
+--       In an equation for ‘v’: v = bvView @32 @(Slice 30 4)
+
+-- <interactive>:23:5: error:
+--     • Invalid index 32 into BV 32
+--     • In the expression: bvView @32 @(Slice 30 4)
+--       In an equation for ‘v’: v = bvView @32 @(Slice 30 4)
 --
--- This library is best used for applications where the types are fully known at
--- compile time. You don't want to write too many functions on these things, as
--- you'll have to figure out how to prove things like @Elem ix ixs ~ 'False@ a
--- lot.
+-- Don't attempt to use this library unless all your type-level indices are
+-- known at compile time.
 module Data.BitVector.Sized.Lens
   ( -- * BVIx
-    BVIx(..)
+    BVIx
   , bvIx
   , bvIxL
     -- * BVView
-  , BVView(..)
+  , BVView
   , bvView
   , bvViewL
     -- * BVViews
-  , BVViews(..)
+  , BVViews
   , bvViews
   , bvViewsL
   -- * Type families on lists
+  -- | Various type families that are useful for constructing types when using
+  -- this library.
   , type (++)
   , type Slice
   , type Slice'
   , type Length
   , type Lengths
-  , type Elem
-  , type Intersection
-  , type Disjoint
-  , type AllDistinct
-  , type AllDisjoint'
-  , type AllDisjoint
   ) where
 
 import           Data.BitVector.Sized ( BV, pattern BV )
@@ -188,9 +186,9 @@ instance (KnownNat ix, ValidIx w ix) => KnownRepr (BVIx w) ix where
 -- | Construct a 'BVIx' when the index is known at compile time.
 --
 -- >>> bvIx @32 @7
--- BVIx 32 7
+-- BVIx 7
 -- >>> :type it
--- it :: BVIx 32 7
+-- it :: BVIx 7
 bvIx :: forall w ix . (KnownNat ix, ValidIx w ix) => BVIx w ix
 bvIx = knownRepr
 
@@ -213,8 +211,8 @@ type family (++) (as :: [k]) (bs :: [k]) :: [k] where
   '[] ++ bs = bs
   (a ': as) ++ bs = a ': (as ++ bs)
 
--- | A "slice" of a bitvector. The first argument is the index, and the second
--- argument is the width.
+-- | A "slice" of a bitvector. The first argument is the index of the least
+-- significant bit of the slice, and the second argument is the width.
 --
 -- >>> :kind! Slice 7 4
 -- Slice 7 4 :: [Nat]
@@ -226,9 +224,9 @@ type family Slice (i :: Nat) (w :: Nat) :: [Nat] where
   Slice i 0 = '[]
   Slice i w = i + w - 1 ': Slice i (w-1)
 
--- | A "reversed slice" of a bitvector. The first argument is the index, and the
--- second argument is the width. The resulting slice reverses the order of the
--- bits.
+-- | A "reversed slice" of a bitvector. The first argument is the index of the
+-- least significant bit of the slice, and the second argument is the width. The
+-- resulting slice reverses the order of the bits.
 --
 -- >>> :kind! Slice' 7 4
 -- Slice' 7 4 :: [Nat]
@@ -274,13 +272,13 @@ instance ( ValidView ixs
 -- | Construct a 'BVView' when the width and indices are known at compile time.
 --
 -- >>> bvView @32 @(Slice 9 3)
--- BVIx 32 11 :- (BVIx 32 10 :- (BVIx 32 9 :- Nil))
+-- BVView (BVIx 11 :< BVIx 10 :< BVIx 9 :< Nil)
 -- >>> :type it
 -- it :: BVView 32 '[11, 10, 9]
 -- >>> bvView @32 @'[5, 7, 5]
--- <interactive>:12:1: error:
---     • Couldn't match type ‘'True’ with ‘'False’
---         arising from a use of ‘bvView’
+-- <interactive>:19:1: error:
+--     • Invalid index list: '[5, 7, 5]
+--       (repeated indices)
 --     • In the expression: bvView @32 @'[5, 7, 5]
 --       In an equation for ‘it’: it = bvView @32 @'[5, 7, 5]
 bvView :: forall w ixs . (KnownRepr (BVView w) ixs, ValidView ixs) => BVView w ixs
@@ -345,13 +343,13 @@ instance ( ValidViews l
 -- | Construct a 'BVViews' when the type is fully known at compile time.
 --
 -- >>> bvViews @32 @'[Slice 9 3, Slice' 14 2]
--- (BVIx 32 11 :- (BVIx 32 10 :- (BVIx 32 9 :- Nil))) :+ ((BVIx 32 14 :- (BVIx 32 15 :- Nil)) :+ Nils)
+-- BVViews (BVView (BVIx 11 :< BVIx 10 :< BVIx 9 :< Nil) :< BVView (BVIx 14 :< BVIx 15 :< Nil) :< Nil)
 -- >>> :type it
 -- it :: BVViews 32 '[ '[11, 10, 9], '[14, 15]]
 -- >>> bvViews @32 @'[Slice 0 3, Slice 2 2]
--- <interactive>:4:1: error:
---     • Couldn't match type ‘'False’ with ‘'True’
---         arising from a use of ‘bvViews’
+-- <interactive>:22:1: error:
+--     • Invalid index lists '[ '[2, 1, 0], '[3, 2]]
+--       (not all lists are disjoint)
 --     • In the expression: bvViews @32 @'[Slice 0 3, Slice 2 2]
 --       In an equation for ‘it’: it = bvViews @32 @'[Slice 0 3, Slice 2 2]
 bvViews :: forall w ixss . (KnownRepr (BVViews w) ixss, ValidViews ixss) => BVViews w ixss
