@@ -144,12 +144,6 @@ type ValidIx :: Nat -> Nat -> Constraint
 class ix + 1 <= w => ValidIx w ix
 instance (ValidIx' w ix ~ 'True, ix + 1 <= w) => ValidIx w ix
 
--- | A lens into a single bit of a 'Data.BitVector.Sized.Internal.BV'.
-bit :: ValidIx w ix => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
-bit w w' = lens (BV.select w' knownNat) s
-  where s bv (BV 1) = BV.setBit w' bv
-        s bv _      = BV.clearBit w w' bv
-
 catLens :: forall w wh wl .
            NatRepr wh
         -> NatRepr wl
@@ -196,6 +190,12 @@ bvIx = knownRepr
 -- | Get a lens from a 'BVIx'.
 bvIxL :: KnownNat w => BVIx w ix -> Lens' (BV w) (BV 1)
 bvIxL (BVIx i) = bit knownNat i
+
+-- | A lens into a single bit of a 'Data.BitVector.Sized.Internal.BV'.
+bit :: ValidIx w ix => NatRepr w -> NatRepr ix -> Lens' (BV w) (BV 1)
+bit w w' = lens (BV.select w' knownNat) s
+  where s bv (BV 1) = BV.setBit w' bv
+        s bv _      = BV.clearBit w w' bv
 
 -- | Type-level list membership.
 type family Elem (a :: k) (l :: [k]) :: Bool where
