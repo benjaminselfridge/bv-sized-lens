@@ -116,19 +116,24 @@ module Data.BitVector.Sized.Lens
   , type Slice'
   , type Length
   , type Lengths
+  -- * Lens validity constraints
+  -- | These classes are used to ensure that the various lenses this library
+  -- provides are well-formed.
+  , ValidIx
+  , ValidView
+  , ValidViews
   ) where
 
 import           Data.BitVector.Sized ( BV, pattern BV )
 import qualified Data.BitVector.Sized as BV
 import Data.Parameterized.Classes
-import           Data.Parameterized.List
+import Data.Parameterized.List
 import Data.Parameterized.NatRepr
 import Data.Type.Bool
 import Data.Type.Equality
 import Control.Lens.Getter
 import Control.Lens.Lens
 import Control.Lens.Setter
-import GHC.Exts (Constraint)
 import GHC.TypeLits
 import Prelude hiding (concat)
 
@@ -138,9 +143,9 @@ type family ValidIx' w ix where
     (TypeError
      (('Text "Invalid index " ':<>: 'ShowType ix ':<>:
        'Text " into BV " ':<>: 'ShowType w) ':$$:
-      ('Text "index must be strictly smaller than bitvector width")))
+      'Text "index must be strictly smaller than bitvector width"))
 
-type ValidIx :: Nat -> Nat -> Constraint
+-- | Constrains @ix@ to be strictly less than @w@.
 class ix + 1 <= w => ValidIx w ix
 instance (ValidIx' w ix ~ 'True, ix + 1 <= w) => ValidIx w ix
 
@@ -209,12 +214,12 @@ type family FindDuplicate (ks :: [k]) :: Maybe k where
 type family CheckFindDuplicateResult ixs mix where
   CheckFindDuplicateResult _ 'Nothing = 'True
   CheckFindDuplicateResult ixs ('Just ix) =
-    TypeError (('Text "Invalid index list: " ':<>: 'ShowType ixs ':$$:
-                'Text "(repeated index " ':<>: 'ShowType ix ':<>: 'Text ")"))
+    TypeError ('Text "Invalid index list: " ':<>: 'ShowType ixs ':$$:
+               'Text "(repeated index " ':<>: 'ShowType ix ':<>: 'Text ")")
 
-type family ValidView' ixs where
-  ValidView' ixs = CheckFindDuplicateResult ixs (FindDuplicate ixs)
+type ValidView' ixs = CheckFindDuplicateResult ixs (FindDuplicate ixs)
 
+-- | Constrains @ixs@ to have no repeated elements.
 class ValidView' ixs ~ 'True => ValidView ixs
 instance ValidView' ixs ~ 'True => ValidView ixs
 
@@ -304,9 +309,9 @@ type family CheckFindIntersectingResult kss m where
                ('Text "(their intersection is " ':<>: 'ShowType (Intersection ks ks') ':<>:
                 'Text ")"))
 
-type family ValidViews' kss where
-  ValidViews' kss = CheckFindIntersectingResult kss (FindIntersecting kss)
+type ValidViews' kss = CheckFindIntersectingResult kss (FindIntersecting kss)
 
+-- | Constraints @kss@ to ensure that all of the lists are disjoint.
 class ValidViews' kss ~ 'True => ValidViews kss
 instance (ValidViews' kss ~ 'True) => ValidViews kss
 
